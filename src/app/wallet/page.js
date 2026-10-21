@@ -8,9 +8,11 @@ import {
   useElements,
   useStripe,
 } from "@stripe/react-stripe-js";
-import { supabase } from "@/lib/supabaseClient";
+import RequireAuth from "@/components/RequireAuth";
+import { Alert, Button, Card, Input, Spinner, cx } from "@/components/ui";
+import { authFetch, errorText } from "@/lib/api";
+import { formatMoney } from "@/lib/format";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
 const publishableKey = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
 const stripePromise = publishableKey ? loadStripe(publishableKey) : null;
 
@@ -18,49 +20,6 @@ const KIND_LABELS = { topup: "Top-up", ride_payment: "Ride payment" };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function authFetch(path, method = "GET", payload = null) {
-  const { data } = await supabase.auth.getSession();
-  const session = data.session;
-  if (!session) {
-    return { res: null, body: { detail: "You are not logged in. Go to /login." } };
-  }
-
-  const headers = { Authorization: `Bearer ${session.access_token}` };
-  const options = { method: method, headers: headers };
-  if (payload) {
-    headers["Content-Type"] = "application/json";
-    options.body = JSON.stringify(payload);
-  }
-
-  try {
-    const res = await fetch(`${API_URL}${path}`, options);
-    const body = await res.json();
-    return { res, body };
-  } catch (err) {
-    return { res: null, body: { detail: "Could not reach the backend." } };
-  }
-}
-
-// Always returns plain text, even if the backend sends a list of validation errors
-function errorText(body, fallback) {
-  const detail = body && body.detail;
-  if (typeof detail === "string") {
-    return detail;
-  }
-  return fallback;
-}
-
-function formatMoney(amount, currency) {
-  try {
-    return (amount / 100).toLocaleString(undefined, {
-      style: "currency",
-      currency: currency.toUpperCase(),
-    });
-  } catch (err) {
-    return `${amount / 100} ${currency.toUpperCase()}`;
-  }
 }
 
 // "100" -> 10000, "99.5" -> 9950, "99.50" -> 9950, anything else -> null
@@ -112,7 +71,7 @@ function TopupForm({ amount, currency, previousBalance, onCredited, onCancel }) 
     }
 
     if (paymentIntent && paymentIntent.status === "succeeded") {
-      setMessage("Stripe accepted the payment. Adding it to your wallet...");
+      setMessage("Payment accepted. Adding it to your wallet...");
       const updated = await waitForCredit();
       onCredited(updated);
       return;
@@ -123,35 +82,30 @@ function TopupForm({ amount, currency, previousBalance, onCredited, onCancel }) 
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex w-full max-w-md flex-col gap-4">
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <PaymentElement />
-      <button
-        type="submit"
-        disabled={!stripe || busy}
-        className="rounded bg-black p-2 text-white disabled:opacity-50"
-      >
+      <Button type="submit" size="lg" loading={busy} disabled={!stripe}>
         {busy ? "Processing..." : `Add ${formatMoney(amount, currency)}`}
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={busy}
-        className="rounded border p-2 disabled:opacity-50"
-      >
+      </Button>
+      <Button variant="secondary" onClick={onCancel} disabled={busy}>
         Change amount
-      </button>
-      <p className="text-sm break-words">{message}</p>
+      </Button>
+      {message && (
+        <p role="status" className="break-words text-sm">
+          {message}
+        </p>
+      )}
     </form>
   );
 }
 
-export default function WalletPage() {
+function WalletContent() {
   const [wallet, setWallet] = useState(null);
   const [transactions, setTransactions] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [amountText, setAmountText] = useState("");
   const [topup, setTopup] = useState(null);
-  const [message, setMessage] = useState("");
+  const [notice, setNotice] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const loadAll = useCallback(async () => {
@@ -166,7 +120,6 @@ export default function WalletPage() {
     } else {
       setLoadError(errorText(walletResult.body, "Could not load your wallet."));
     }
-
     if (txResult.res && txResult.res.ok) {
       setTransactions(txResult.body);
     }
@@ -178,23 +131,25 @@ export default function WalletPage() {
 
   async function startTopup(e) {
     e.preventDefault();
-    setMessage("");
+    setNotice(null);
 
     const amount = parseAmount(amountText);
     if (amount === null) {
-      setMessage("Enter an amount like 100 or 99.50.");
+      setNotice({ tone: "warning", text: "Enter an amount like 100 or 99.50." });
       return;
     }
     if (amount < wallet.min_topup) {
-      setMessage(
-        `The minimum top-up is ${formatMoney(wallet.min_topup, wallet.currency)}.`
-      );
+      setNotice({
+        tone: "warning",
+        text: `The minimum top-up is ${formatMoney(wallet.min_topup, wallet.currency)}.`,
+      });
       return;
     }
     if (amount > wallet.max_topup) {
-      setMessage(
-        `The maximum top-up is ${formatMoney(wallet.max_topup, wallet.currency)}.`
-      );
+      setNotice({
+        tone: "warning",
+        text: `The maximum top-up is ${formatMoney(wallet.max_topup, wallet.currency)}.`,
+      });
       return;
     }
 
@@ -203,7 +158,10 @@ export default function WalletPage() {
     if (res && res.ok) {
       setTopup(body);
     } else {
-      setMessage(errorText(body, "Could not start the top-up. Check the amount."));
+      setNotice({
+        tone: res && res.status === 429 ? "warning" : "error",
+        text: errorText(body, "Could not start the top-up. Check the amount."),
+      });
     }
     setBusy(false);
   }
@@ -211,121 +169,154 @@ export default function WalletPage() {
   function handleCredited(updated) {
     setTopup(null);
     setAmountText("");
-    setMessage(
+    setNotice(
       updated
-        ? "Top-up complete."
-        : "Payment received. Your balance will update in a moment."
+        ? { tone: "success", text: "Top-up complete." }
+        : {
+            tone: "info",
+            text: "Payment received. Your balance will update in a moment.",
+          }
     );
     loadAll();
   }
 
   if (!stripePromise) {
     return (
-      <main className="flex min-h-screen items-center justify-center p-4">
-        <p>Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY in frontend/.env.local</p>
+      <main className="mx-auto w-full max-w-3xl px-4 py-10">
+        <Alert tone="error">
+          Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY in frontend/.env.local
+        </Alert>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-6 p-4">
-      <h1 className="text-2xl font-bold">Your wallet</h1>
+    <main className="mx-auto w-full max-w-5xl px-4 py-6">
+      <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Wallet</h1>
+      <p className="mt-1 text-sm text-slate-600 dark:text-zinc-400">
+        Top up and pay for rides from your balance.
+      </p>
 
-      {loadError && <p className="text-sm break-words">{loadError}</p>}
-      {!loadError && !wallet && <p>Loading...</p>}
+      {loadError && (
+        <Alert tone="error" className="mt-6">
+          {loadError}
+        </Alert>
+      )}
+      {!loadError && !wallet && (
+        <Card className="mt-6 flex items-center gap-3 p-6 text-sm text-slate-600 dark:text-zinc-400">
+          <Spinner className="h-5 w-5" />
+          Loading...
+        </Card>
+      )}
 
       {wallet && (
-        <>
-          <section>
-            <p className="text-sm">Balance</p>
-            <p className="text-3xl font-bold">
-              {formatMoney(wallet.balance, wallet.currency)}
-            </p>
-          </section>
+        <div className="mt-6 grid gap-4 lg:grid-cols-[24rem_1fr]">
+          <div className="flex min-w-0 flex-col gap-4">
+            <Card className="p-6">
+              <p className="text-sm text-slate-500 dark:text-zinc-400">
+                Current balance
+              </p>
+              <p className="mt-1 text-4xl font-bold tracking-tight">
+                {formatMoney(wallet.balance, wallet.currency)}
+              </p>
+            </Card>
 
-          <section className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">Add money</h2>
+            <Card className="flex flex-col gap-4 p-6">
+              <h2 className="text-lg font-semibold">Add money</h2>
 
-            {!topup && (
-              <form onSubmit={startTopup} className="flex flex-col gap-2">
-                <label htmlFor="amount" className="text-sm">
-                  Amount ({wallet.currency.toUpperCase()}), from{" "}
-                  {formatMoney(wallet.min_topup, wallet.currency)} to{" "}
-                  {formatMoney(wallet.max_topup, wallet.currency)}
-                </label>
-                <input
-                  id="amount"
-                  value={amountText}
-                  onChange={(e) => setAmountText(e.target.value)}
-                  inputMode="decimal"
-                  placeholder="100"
-                  className="rounded border p-2"
-                />
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="rounded bg-black p-2 text-white disabled:opacity-50"
+              {notice && <Alert tone={notice.tone}>{notice.text}</Alert>}
+
+              {!topup && (
+                <form onSubmit={startTopup} className="flex flex-col gap-4">
+                  <Input
+                    id="amount"
+                    label={`Amount (${wallet.currency.toUpperCase()})`}
+                    hint={`From ${formatMoney(wallet.min_topup, wallet.currency)} to ${formatMoney(wallet.max_topup, wallet.currency)}`}
+                    value={amountText}
+                    onChange={(e) => setAmountText(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="100"
+                    autoComplete="off"
+                  />
+                  <Button type="submit" size="lg" loading={busy}>
+                    Continue
+                  </Button>
+                </form>
+              )}
+
+              {topup && (
+                <Elements
+                  key={topup.client_secret}
+                  stripe={stripePromise}
+                  options={{ clientSecret: topup.client_secret }}
                 >
-                  {busy ? "Starting..." : "Continue"}
-                </button>
-              </form>
-            )}
+                  <TopupForm
+                    amount={topup.amount}
+                    currency={topup.currency}
+                    previousBalance={wallet.balance}
+                    onCredited={handleCredited}
+                    onCancel={() => setTopup(null)}
+                  />
+                </Elements>
+              )}
+            </Card>
+          </div>
 
-            {topup && (
-              <Elements
-                key={topup.client_secret}
-                stripe={stripePromise}
-                options={{ clientSecret: topup.client_secret }}
-              >
-                <TopupForm
-                  amount={topup.amount}
-                  currency={topup.currency}
-                  previousBalance={wallet.balance}
-                  onCredited={handleCredited}
-                  onCancel={() => setTopup(null)}
-                />
-              </Elements>
-            )}
-
-            {message && <p className="text-sm break-words">{message}</p>}
-          </section>
-
-          <section className="flex flex-col gap-2">
+          <Card className="min-w-0 p-6">
             <h2 className="text-lg font-semibold">History</h2>
             {transactions && transactions.transactions.length === 0 && (
-              <p className="text-sm">No transactions yet.</p>
+              <p className="mt-3 text-sm text-slate-600 dark:text-zinc-400">
+                No transactions yet.
+              </p>
             )}
             {transactions && transactions.transactions.length > 0 && (
-              <ul className="flex flex-col gap-2">
+              <ul className="mt-3 flex flex-col divide-y divide-slate-200 dark:divide-zinc-800">
                 {transactions.transactions.map((tx) => (
                   <li
                     key={tx.id}
-                    className="flex items-center justify-between rounded border p-2 text-sm"
+                    className="flex items-center justify-between gap-3 py-3 text-sm"
                   >
                     <div>
                       <p className="font-medium">{KIND_LABELS[tx.kind] || tx.kind}</p>
-                      <p>{new Date(tx.created_at).toLocaleString()}</p>
+                      <p className="text-xs text-slate-500 dark:text-zinc-400">
+                        {new Date(tx.created_at).toLocaleString()}
+                      </p>
                     </div>
                     <div className="text-right">
-                      <p className="font-medium">
+                      <p
+                        className={cx(
+                          "font-semibold",
+                          tx.amount > 0 && "text-emerald-600 dark:text-emerald-400"
+                        )}
+                      >
                         {tx.amount > 0 ? "+" : ""}
                         {formatMoney(tx.amount, tx.currency)}
                       </p>
-                      <p>Balance {formatMoney(tx.balance_after, tx.currency)}</p>
+                      <p className="text-xs text-slate-500 dark:text-zinc-400">
+                        Balance {formatMoney(tx.balance_after, tx.currency)}
+                      </p>
                     </div>
                   </li>
                 ))}
               </ul>
             )}
             {transactions && transactions.total > transactions.transactions.length && (
-              <p className="text-sm">
+              <p className="mt-3 text-xs text-slate-500 dark:text-zinc-400">
                 Showing the latest {transactions.transactions.length} of{" "}
                 {transactions.total}.
               </p>
             )}
-          </section>
-        </>
+          </Card>
+        </div>
       )}
     </main>
+  );
+}
+
+export default function WalletPage() {
+  return (
+    <RequireAuth title="Wallet" loginHref="/login" signupHref="/signup">
+      <WalletContent />
+    </RequireAuth>
   );
 }

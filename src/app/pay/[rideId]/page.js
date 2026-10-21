@@ -9,53 +9,36 @@ import {
   useElements,
   useStripe,
 } from "@stripe/react-stripe-js";
-import { supabase } from "@/lib/supabaseClient";
+import RequireAuth from "@/components/RequireAuth";
+import {
+  Alert,
+  Button,
+  ButtonLink,
+  Card,
+  Input,
+  Spinner,
+} from "@/components/ui";
+import { authFetch, errorText } from "@/lib/api";
+import { formatMoney } from "@/lib/format";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
 const publishableKey = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
 const stripePromise = publishableKey ? loadStripe(publishableKey) : null;
 
-async function authFetch(path, method = "GET", payload = null) {
-  const { data } = await supabase.auth.getSession();
-  const session = data.session;
-  if (!session) {
-    return { res: null, body: { detail: "You are not logged in. Go to /login." } };
-  }
-
-  const headers = { Authorization: `Bearer ${session.access_token}` };
-  const options = { method: method, headers: headers };
-  if (payload) {
-    headers["Content-Type"] = "application/json";
-    options.body = JSON.stringify(payload);
-  }
-
-  try {
-    const res = await fetch(`${API_URL}${path}`, options);
-    const body = await res.json();
-    return { res, body };
-  } catch (err) {
-    return { res: null, body: { detail: "Could not reach the backend." } };
-  }
-}
-
-// Always returns plain text, even if the backend sends a list of validation errors
-function errorText(body, fallback) {
-  const detail = body && body.detail;
-  if (typeof detail === "string") {
-    return detail;
-  }
-  return fallback;
-}
-
-function formatMoney(amount, currency) {
-  try {
-    return (amount / 100).toLocaleString(undefined, {
-      style: "currency",
-      currency: currency.toUpperCase(),
-    });
-  } catch (err) {
-    return `${amount / 100} ${currency.toUpperCase()}`;
-  }
+function Row({ label, value, strong }) {
+  return (
+    <div className="flex items-center justify-between">
+      <dt
+        className={
+          strong ? "font-semibold" : "text-sm text-slate-600 dark:text-zinc-400"
+        }
+      >
+        {label}
+      </dt>
+      <dd className={strong ? "text-xl font-bold" : "text-sm font-medium"}>
+        {value}
+      </dd>
+    </div>
+  );
 }
 
 function CheckoutForm({ rideId, amount, currency, onPaid }) {
@@ -98,13 +81,13 @@ function CheckoutForm({ rideId, amount, currency, onPaid }) {
     }
 
     if (paymentIntent && paymentIntent.status === "succeeded") {
-      setMessage("Stripe accepted the payment. Confirming with our server...");
+      setMessage("Payment accepted. Confirming with our server...");
       onPaid();
       const confirmed = await waitForBackend();
       setMessage(
         confirmed
           ? "Payment confirmed. Thank you!"
-          : "Stripe accepted the payment, but our server has not confirmed it yet. Check again in a moment."
+          : "Payment accepted, but our server has not confirmed it yet. Check your rides in a moment."
       );
       setDone(true);
     } else {
@@ -115,16 +98,17 @@ function CheckoutForm({ rideId, amount, currency, onPaid }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex w-full max-w-md flex-col gap-4">
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <PaymentElement />
-      <button
-        type="submit"
-        disabled={!stripe || busy || done}
-        className="rounded bg-black p-2 text-white disabled:opacity-50"
-      >
-        {busy ? "Processing..." : `Pay ${formatMoney(amount, currency)}`}
-      </button>
-      <p className="text-sm break-words">{message}</p>
+      <Button type="submit" size="lg" loading={busy} disabled={!stripe || done}>
+        {busy ? "Processing..." : `Pay ${formatMoney(amount, currency)} by card`}
+      </Button>
+      {message && (
+        <p role="status" className="break-words text-sm">
+          {message}
+        </p>
+      )}
+      {done && <ButtonLink href="/rides">Back to my rides</ButtonLink>}
     </form>
   );
 }
@@ -137,17 +121,17 @@ function PayContent() {
   const [error, setError] = useState("");
   const [paid, setPaid] = useState(false);
   const [promoInput, setPromoInput] = useState("");
-  const [promoMessage, setPromoMessage] = useState("");
+  const [promoNotice, setPromoNotice] = useState(null);
   const [promoBusy, setPromoBusy] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [walletBusy, setWalletBusy] = useState(false);
-  const [walletMessage, setWalletMessage] = useState("");
+  const [walletNotice, setWalletNotice] = useState(null);
   const [paidByWallet, setPaidByWallet] = useState(false);
 
   useEffect(() => {
     if (!rideId) {
       setError("Invalid payment link.");
-      return;
+      return undefined;
     }
 
     let cancelled = false;
@@ -189,14 +173,15 @@ function PayContent() {
     };
   }, []);
 
-  async function applyPromo() {
+  async function applyPromo(e) {
+    e.preventDefault();
     const code = promoInput.trim();
     if (!code) {
       return;
     }
 
     setPromoBusy(true);
-    setPromoMessage("");
+    setPromoNotice(null);
 
     const { res, body } = await authFetch(
       `/api/payments/rides/${rideId}/intent`,
@@ -207,11 +192,15 @@ function PayContent() {
     if (res && res.ok) {
       setIntent(body);
       setPromoInput("");
-      setPromoMessage(
-        `Promo applied. You save ${formatMoney(body.discount_amount, body.currency)}.`
-      );
+      setPromoNotice({
+        tone: "success",
+        text: `Promo applied. You save ${formatMoney(body.discount_amount, body.currency)}.`,
+      });
     } else {
-      setPromoMessage(errorText(body, "Could not apply this code."));
+      setPromoNotice({
+        tone: "error",
+        text: errorText(body, "Could not apply this code."),
+      });
     }
 
     setPromoBusy(false);
@@ -219,7 +208,7 @@ function PayContent() {
 
   async function payWithWallet() {
     setWalletBusy(true);
-    setWalletMessage("");
+    setWalletNotice(null);
 
     const { res, body } = await authFetch(
       `/api/payments/rides/${rideId}/pay-with-wallet`,
@@ -229,9 +218,12 @@ function PayContent() {
     if (res && res.ok) {
       setPaidByWallet(true);
       setWallet({ balance: body.balance_after, currency: body.currency });
-      setWalletMessage("Paid from your wallet. Thank you!");
+      setWalletNotice({ tone: "success", text: "Paid from your wallet. Thank you!" });
     } else {
-      setWalletMessage(errorText(body, "Could not pay from the wallet."));
+      setWalletNotice({
+        tone: "error",
+        text: errorText(body, "Could not pay from the wallet."),
+      });
     }
 
     setWalletBusy(false);
@@ -239,98 +231,175 @@ function PayContent() {
 
   if (!stripePromise) {
     return (
-      <main className="flex min-h-screen items-center justify-center p-4">
-        <p>Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY in frontend/.env.local</p>
+      <main className="mx-auto w-full max-w-xl px-4 py-10">
+        <Alert tone="error">
+          Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY in frontend/.env.local
+        </Alert>
       </main>
     );
   }
 
-  const canUseWallet = intent && wallet && !paid && !paidByWallet;
+  const finished = paid || paidByWallet;
+  const canUseWallet = intent && wallet && !finished;
   const enoughBalance = canUseWallet && wallet.balance >= intent.amount;
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-4">
-      <h1 className="text-2xl font-bold">Pay for your ride</h1>
+    <main className="mx-auto flex w-full max-w-xl flex-col gap-4 px-4 py-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+          Pay for your ride
+        </h1>
+        <p className="mt-1 text-sm text-slate-600 dark:text-zinc-400">
+          Choose how you would like to pay.
+        </p>
+      </div>
 
-      {error && <p className="text-sm break-words">{error}</p>}
-      {!error && !intent && <p>Loading...</p>}
-
-      {intent && intent.discount_amount > 0 && (
-        <div className="w-full max-w-md text-sm">
-          <p>Fare: {formatMoney(intent.original_amount, intent.currency)}</p>
-          <p>Discount: -{formatMoney(intent.discount_amount, intent.currency)}</p>
+      {error && (
+        <div className="flex flex-col items-start gap-3">
+          <Alert tone="error" className="w-full">
+            {error}
+          </Alert>
+          <ButtonLink href="/rides" variant="secondary">
+            Back to my rides
+          </ButtonLink>
         </div>
       )}
 
-      {intent && !paid && !paidByWallet && (
-        <div className="flex w-full max-w-md flex-col gap-2">
-          <div className="flex gap-2">
-            <input
+      {!error && !intent && (
+        <Card className="flex items-center gap-3 p-6 text-sm text-slate-600 dark:text-zinc-400">
+          <Spinner className="h-5 w-5" />
+          Loading...
+        </Card>
+      )}
+
+      {intent && (
+        <Card className="p-5">
+          <dl className="flex flex-col gap-2">
+            <Row
+              label="Fare"
+              value={formatMoney(intent.original_amount, intent.currency)}
+            />
+            {intent.discount_amount > 0 && (
+              <Row
+                label="Discount"
+                value={`-${formatMoney(intent.discount_amount, intent.currency)}`}
+              />
+            )}
+            <div className="mt-1 border-t border-slate-200 pt-3 dark:border-zinc-800">
+              <Row
+                label="Total"
+                value={formatMoney(intent.amount, intent.currency)}
+                strong
+              />
+            </div>
+          </dl>
+        </Card>
+      )}
+
+      {intent && !finished && (
+        <Card className="p-5">
+          <form onSubmit={applyPromo} className="flex flex-col gap-3">
+            <Input
+              id="promo"
+              label="Promo code"
               value={promoInput}
               onChange={(e) => setPromoInput(e.target.value)}
-              placeholder="Promo code"
-              className="flex-1 rounded border p-2"
+              autoComplete="off"
             />
-            <button
-              type="button"
-              onClick={applyPromo}
-              disabled={promoBusy || !promoInput.trim()}
-              className="rounded border px-4 py-2 disabled:opacity-50"
+            <Button
+              type="submit"
+              variant="secondary"
+              loading={promoBusy}
+              disabled={!promoInput.trim()}
+              className="self-start"
             >
-              {promoBusy ? "Applying..." : "Apply"}
-            </button>
-          </div>
-          {promoMessage && <p className="text-sm break-words">{promoMessage}</p>}
-        </div>
+              Apply code
+            </Button>
+            {promoNotice && <Alert tone={promoNotice.tone}>{promoNotice.text}</Alert>}
+          </form>
+        </Card>
       )}
 
       {canUseWallet && (
-        <div className="flex w-full max-w-md flex-col gap-2 text-sm">
-          <p>Wallet balance: {formatMoney(wallet.balance, wallet.currency)}</p>
-          <button
-            type="button"
+        <Card className="flex flex-col gap-3 p-5">
+          <h2 className="font-semibold">Pay from your wallet</h2>
+          <p className="text-sm text-slate-600 dark:text-zinc-400">
+            Balance: {formatMoney(wallet.balance, wallet.currency)}
+          </p>
+          <Button
             onClick={payWithWallet}
-            disabled={walletBusy || !enoughBalance}
-            className="rounded border px-4 py-2 disabled:opacity-50"
+            loading={walletBusy}
+            disabled={!enoughBalance}
           >
-            {walletBusy
-              ? "Paying..."
-              : `Pay ${formatMoney(intent.amount, intent.currency)} from wallet`}
-          </button>
-          {!enoughBalance && <p>Not enough wallet balance.</p>}
+            Pay {formatMoney(intent.amount, intent.currency)} from wallet
+          </Button>
+          {!enoughBalance && (
+            <p className="text-sm text-slate-600 dark:text-zinc-400">
+              Not enough wallet balance.{" "}
+              <a
+                href="/wallet"
+                className="font-semibold text-indigo-600 underline underline-offset-4 dark:text-indigo-400"
+              >
+                Add money
+              </a>
+            </p>
+          )}
+        </Card>
+      )}
+
+      {walletNotice && <Alert tone={walletNotice.tone}>{walletNotice.text}</Alert>}
+
+      {paidByWallet && (
+        <div className="flex flex-wrap gap-2">
+          <ButtonLink href="/rides">Back to my rides</ButtonLink>
+          <ButtonLink href="/book" variant="secondary">
+            Book another ride
+          </ButtonLink>
         </div>
       )}
 
-      {walletMessage && <p className="text-sm break-words">{walletMessage}</p>}
-
       {intent && !paidByWallet && (
-        <Elements
-          key={`${intent.client_secret}-${intent.amount}`}
-          stripe={stripePromise}
-          options={{ clientSecret: intent.client_secret }}
-        >
-          <CheckoutForm
-            rideId={rideId}
-            amount={intent.amount}
-            currency={intent.currency}
-            onPaid={() => setPaid(true)}
-          />
-        </Elements>
+        <Card className="p-5">
+          <h2 className="mb-4 font-semibold">Pay by card</h2>
+          <Elements
+            key={`${intent.client_secret}-${intent.amount}`}
+            stripe={stripePromise}
+            options={{ clientSecret: intent.client_secret }}
+          >
+            <CheckoutForm
+              rideId={rideId}
+              amount={intent.amount}
+              currency={intent.currency}
+              onPaid={() => setPaid(true)}
+            />
+          </Elements>
+        </Card>
       )}
+    </main>
+  );
+}
+
+function LoadingMain() {
+  return (
+    <main className="mx-auto w-full max-w-xl px-4 py-10">
+      <Card className="flex items-center gap-3 p-6 text-sm text-slate-600 dark:text-zinc-400">
+        <Spinner className="h-5 w-5" />
+        Loading...
+      </Card>
     </main>
   );
 }
 
 export default function PayPage() {
   return (
-    <Suspense
-      fallback={
-        <main className="flex min-h-screen items-center justify-center p-4">
-          <p>Loading...</p>
-        </main>
-      }
-    >
-      <PayContent />
+    <Suspense fallback={<LoadingMain />}>
+      <RequireAuth
+        title="Pay for your ride"
+        loginHref="/login"
+        signupHref="/signup"
+      >
+        <PayContent />
+      </RequireAuth>
     </Suspense>
   );
 }
