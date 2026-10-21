@@ -13,6 +13,23 @@ pnpm dev
 # or
 bun dev
 ```
+# Cab Booking Platform
+
+A full-stack ride-hailing app: riders book rides on a map, drivers accept and run them, with live updates, payments, a wallet, promo codes, receipts and reviews.
+
+**Stack:** Next.js (JavaScript) + Tailwind + Leaflet, FastAPI, Supabase (Postgres, PostGIS, Auth), Upstash Redis, Stripe (test mode), WebSockets.
+
+## Run it locally
+1. Copy `backend/.env.example` to `backend/.env` and `frontend/.env.example` to `frontend/.env.local`, and fill in your own values.
+2. Backend: `cd backend`, create a virtual environment, `pip install -r requirements.txt`, `alembic upgrade head`, `uvicorn main:app --reload`.
+3. Frontend: `cd frontend`, `npm install`, `npm run dev`.
+4. Payments: `stripe listen --events "payment_intent.succeeded,payment_intent.payment_failed" --forward-to localhost:8000/api/webhooks/stripe`, and put the printed secret in `STRIPE_WEBHOOK_SECRET`.
+
+## Tests
+`cd backend` then `pytest`. See `MANUAL_TESTING.md` for the flows that need real services, and `python scripts/simulate.py` for a multi-user simulation.
+
+## Notes
+Stripe runs in test mode only (the backend refuses live keys). Verify drivers in the database before they can go online.
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
