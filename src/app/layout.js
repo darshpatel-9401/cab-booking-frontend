@@ -1,5 +1,6 @@
 import "./globals.css";
 import AuthProvider from "@/components/AuthProvider";
+import { Suspense } from "react";
 import NavBar from "@/components/NavBar";
 
 export const metadata = {
@@ -18,7 +19,9 @@ export default function RootLayout({ children }) {
           Skip to content
         </a>
         <AuthProvider>
-          <NavBar />
+          <Suspense fallback={<div className="h-16" aria-hidden="true" />}>
+            <NavBar />
+          </Suspense>
           <div id="content">{children}</div>
         </AuthProvider>
       </body>
